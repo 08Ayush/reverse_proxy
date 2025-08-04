@@ -27,6 +27,69 @@ In Render's Environment section, add these variables:
 | `AWS_LIGHTSAIL_URL` | `http://YOUR_AWS_IP:8000` | Replace with your AWS Lightsail public IP |
 | `PROXY_TOKEN` | `6e8b43cca9d29b261843a3b1c53382bdaa5b2c9e96db92da679278c6dc0042ca` | API token for AWS instance |
 | `TIMEOUT_SECONDS` | `120` | Request timeout in seconds |
+| `ENABLE_CONTINUOUS_HEALTH_CHECK` | `true` | Enable continuous server health monitoring |
+| `HEALTH_CHECK_INTERVAL` | `10` | Health check interval in seconds |
+
+## 🔄 Continuous Health Monitoring
+
+The proxy includes a built-in continuous health monitoring system that runs every 10 seconds (configurable) to track:
+
+### Monitored Metrics
+- **CPU Usage**: Real-time CPU utilization percentage
+- **Memory Usage**: RAM usage percentage
+- **Request Count**: Total number of requests processed
+- **Error Count**: Number of failed requests
+- **Error Rate**: Percentage of failed requests
+- **Uptime**: Server uptime in human-readable format
+- **AWS Connection Status**: Real-time status of AWS instance connectivity
+
+### Health Monitoring Endpoints
+
+#### Server Health with Monitoring
+```bash
+GET /server/health
+```
+
+**Response Example:**
+```json
+{
+  "server_status": "healthy",
+  "uptime_seconds": 3661.45,
+  "uptime_formatted": "1h 1m 1s",
+  "last_health_check": 1691234567.89,
+  "last_health_check_ago": 2.34,
+  "system_stats": {
+    "cpu_usage_percent": 15.2,
+    "memory_usage_percent": 42.8,
+    "request_count": 150,
+    "error_count": 2,
+    "error_rate": 1.33
+  },
+  "aws_connection_status": "healthy",
+  "monitoring_enabled": true,
+  "monitoring_interval_seconds": 10,
+  "timestamp": 1691234570.23
+}
+```
+
+### Configuration
+Set these environment variables to configure health monitoring:
+
+- `ENABLE_CONTINUOUS_HEALTH_CHECK=true` - Enable/disable monitoring
+- `HEALTH_CHECK_INTERVAL=10` - Check interval in seconds (default: 10)
+
+### Benefits
+- **Proactive Monitoring**: Detect issues before they affect users
+- **Performance Insights**: Track resource usage over time
+- **Debugging**: Error rates and request counts help identify problems
+- **Uptime Tracking**: Monitor server reliability
+
+## 🧪 Testing Your Deployment
+
+### Test 0: Server Health Monitoring
+```bash
+curl https://your-service-name.onrender.com/server/health
+```
 
 **Important**: Replace `YOUR_AWS_IP` with your actual AWS Lightsail public IP address.
 
@@ -65,6 +128,7 @@ Authorization: Bearer 6e8b43cca9d29b261843a3b1c53382bdaa5b2c9e96db92da679278c6dc
 - `GET /health` - Basic health check
 - `GET /api/health` - Comprehensive health check
 - `GET /proxy/health` - Proxy-specific health check
+- `GET /server/health` - **Server health with continuous monitoring (NEW)**
 
 ### Status Endpoints
 - `GET /redis-status` - Redis connection status

@@ -14,6 +14,9 @@ from fastapi import FastAPI, HTTPException, Header, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
+from datetime import datetime
+import psutil
+import threading
 
 # Logging configuration
 logging.basicConfig(
@@ -26,6 +29,119 @@ logger = logging.getLogger(__name__)
 AWS_LIGHTSAIL_URL = os.getenv('AWS_LIGHTSAIL_URL', 'http://YOUR_AWS_IP:8000')
 PROXY_TOKEN = os.getenv('PROXY_TOKEN', '6e8b43cca9d29b261843a3b1c53382bdaa5b2c9e96db92da679278c6dc0042ca')
 TIMEOUT_SECONDS = int(os.getenv('TIMEOUT_SECONDS', '120'))
+
+# Health monitoring configuration
+HEALTH_CHECK_INTERVAL = int(os.getenv('HEALTH_CHECK_INTERVAL', '10'))  # seconds
+ENABLE_CONTINUOUS_HEALTH_CHECK = os.getenv('ENABLE_CONTINUOUS_HEALTH_CHECK', 'true').lower() == 'true'
+
+# Global health monitoring state
+class HealthMonitor:
+    def __init__(self):
+        self.server_start_time = time.time()
+        self.last_health_check = time.time()
+        self.health_status = "starting"
+        self.request_count = 0
+        self.error_count = 0
+        self.aws_connection_status = "unknown"
+        self.cpu_usage = 0.0
+        self.memory_usage = 0.0
+        self.uptime_seconds = 0
+        self.is_monitoring = False
+        self.monitor_thread = None
+    
+    def start_monitoring(self):
+        """Start continuous health monitoring"""
+        if not self.is_monitoring and ENABLE_CONTINUOUS_HEALTH_CHECK:
+            self.is_monitoring = True
+            self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+            self.monitor_thread.start()
+            logger.info(f"🔄 Started continuous health monitoring (every {HEALTH_CHECK_INTERVAL}s)")
+    
+    def stop_monitoring(self):
+        """Stop continuous health monitoring"""
+        self.is_monitoring = False
+        if self.monitor_thread:
+            self.monitor_thread.join(timeout=1)
+        logger.info("🛑 Stopped continuous health monitoring")
+    
+    def _monitor_loop(self):
+        """Continuous monitoring loop"""
+        while self.is_monitoring:
+            try:
+                self._update_system_stats()
+                self.last_health_check = time.time()
+                self.health_status = "healthy"
+                logger.debug(f"✅ Health check: CPU {self.cpu_usage:.1f}%, Memory {self.memory_usage:.1f}%")
+            except Exception as e:
+                logger.error(f"❌ Health monitoring error: {e}")
+                self.health_status = "degraded"
+            
+            time.sleep(HEALTH_CHECK_INTERVAL)
+    
+    def _update_system_stats(self):
+        """Update system statistics"""
+        try:
+            # CPU and memory usage
+            self.cpu_usage = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory()
+            self.memory_usage = memory.percent
+            
+            # Uptime
+            self.uptime_seconds = time.time() - self.server_start_time
+        except Exception as e:
+            logger.warning(f"Failed to update system stats: {e}")
+    
+    def increment_request(self):
+        """Increment request counter"""
+        self.request_count += 1
+    
+    def increment_error(self):
+        """Increment error counter"""
+        self.error_count += 1
+    
+    def update_aws_status(self, status: str):
+        """Update AWS connection status"""
+        self.aws_connection_status = status
+    
+    def get_health_data(self) -> Dict[str, Any]:
+        """Get current health data"""
+        return {
+            "server_status": self.health_status,
+            "uptime_seconds": round(self.uptime_seconds, 2),
+            "uptime_formatted": self._format_uptime(self.uptime_seconds),
+            "last_health_check": self.last_health_check,
+            "last_health_check_ago": round(time.time() - self.last_health_check, 2),
+            "system_stats": {
+                "cpu_usage_percent": round(self.cpu_usage, 2),
+                "memory_usage_percent": round(self.memory_usage, 2),
+                "request_count": self.request_count,
+                "error_count": self.error_count,
+                "error_rate": round((self.error_count / max(self.request_count, 1)) * 100, 2)
+            },
+            "aws_connection_status": self.aws_connection_status,
+            "monitoring_enabled": self.is_monitoring,
+            "monitoring_interval_seconds": HEALTH_CHECK_INTERVAL,
+            "timestamp": time.time()
+        }
+    
+    def _format_uptime(self, seconds: float) -> str:
+        """Format uptime in human readable format"""
+        days = int(seconds // 86400)
+        hours = int((seconds % 86400) // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        
+        if days > 0:
+            return f"{days}d {hours}h {minutes}m {secs}s"
+        elif hours > 0:
+            return f"{hours}h {minutes}m {secs}s"
+        elif minutes > 0:
+            return f"{minutes}m {secs}s"
+        else:
+            return f"{secs}s"
+
+# Global health monitor instance
+health_monitor = HealthMonitor()
 
 # FastAPI app
 app = FastAPI(
@@ -60,6 +176,18 @@ class ProxyHealthResponse(BaseModel):
     timestamp: float
     response_time_ms: Optional[float] = None
 
+class ServerHealthResponse(BaseModel):
+    server_status: str
+    uptime_seconds: float
+    uptime_formatted: str
+    last_health_check: float
+    last_health_check_ago: float
+    system_stats: Dict[str, Any]
+    aws_connection_status: str
+    monitoring_enabled: bool
+    monitoring_interval_seconds: int
+    timestamp: float
+
 # Global HTTP session
 http_session: Optional[aiohttp.ClientSession] = None
 
@@ -79,6 +207,8 @@ async def forward_request(
     params: Optional[Dict[str, str]] = None
 ) -> tuple[int, Dict[str, Any]]:
     """Forward request to AWS Lightsail instance"""
+    health_monitor.increment_request()
+    
     try:
         session = await get_http_session()
         url = f"{AWS_LIGHTSAIL_URL}{endpoint}"
@@ -106,15 +236,28 @@ async def forward_request(
                 response_data = {"message": await response.text()}
             
             logger.info(f"✅ AWS response: {response.status}")
+            
+            # Update AWS connection status
+            if response.status == 200:
+                health_monitor.update_aws_status("healthy")
+            else:
+                health_monitor.update_aws_status("unhealthy")
+            
             return response.status, response_data
             
     except aiohttp.ClientTimeout:
+        health_monitor.increment_error()
+        health_monitor.update_aws_status("timeout")
         logger.error(f"⏰ Timeout forwarding request to {url}")
         return 504, {"error": "Gateway timeout - AWS instance took too long to respond"}
     except aiohttp.ClientError as e:
+        health_monitor.increment_error()
+        health_monitor.update_aws_status("unreachable")
         logger.error(f"🔌 Connection error: {e}")
         return 502, {"error": f"Bad gateway - Cannot connect to AWS instance: {str(e)}"}
     except Exception as e:
+        health_monitor.increment_error()
+        health_monitor.update_aws_status("error")
         logger.error(f"❌ Unexpected error: {e}")
         return 500, {"error": f"Internal proxy error: {str(e)}"}
 
@@ -127,11 +270,13 @@ async def root():
         "version": "1.0.0",
         "description": "Reverse proxy for PAANY RAG system on AWS Lightsail",
         "aws_target": AWS_LIGHTSAIL_URL,
+        "server_health": health_monitor.get_health_data(),
         "endpoints": {
             "main_rag_api": "/api/v1/hackrx/run",
             "health_check": "/health",
             "api_health": "/api/health",
             "proxy_health": "/proxy/health",
+            "server_health": "/server/health",
             "redis_status": "/redis-status"
         },
         "documentation": {
@@ -229,6 +374,37 @@ async def proxy_health_check():
             response_time_ms=response_time_ms
         )
 
+@app.get("/server/health", response_model=ServerHealthResponse)
+async def server_health_check():
+    """Get detailed server health information with continuous monitoring stats"""
+    try:
+        # Get current health data from monitor
+        health_data = health_monitor.get_health_data()
+        
+        return ServerHealthResponse(**health_data)
+        
+    except Exception as e:
+        logger.error(f"❌ Server health check failed: {e}")
+        # Return basic health data even if monitoring fails
+        return ServerHealthResponse(
+            server_status="error",
+            uptime_seconds=time.time() - health_monitor.server_start_time,
+            uptime_formatted="unknown",
+            last_health_check=0,
+            last_health_check_ago=999999,
+            system_stats={
+                "cpu_usage_percent": 0,
+                "memory_usage_percent": 0,
+                "request_count": health_monitor.request_count,
+                "error_count": health_monitor.error_count,
+                "error_rate": 0
+            },
+            aws_connection_status="unknown",
+            monitoring_enabled=health_monitor.is_monitoring,
+            monitoring_interval_seconds=HEALTH_CHECK_INTERVAL,
+            timestamp=time.time()
+        )
+
 # Redis status endpoint
 @app.get("/redis-status")
 async def redis_status(authorization: str = Header(None)):
@@ -314,13 +490,28 @@ async def debug_document_structure(
     else:
         raise HTTPException(status_code=status_code, detail="Debug request failed")
 
+# Startup and shutdown events
+@app.on_event("startup")
+async def startup_event():
+    """Initialize health monitoring on startup"""
+    logger.info("🚀 Starting PAANY RAG Reverse Proxy...")
+    health_monitor.start_monitoring()
+    logger.info("✅ Server startup complete")
+
 # Cleanup on shutdown
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up resources on shutdown"""
+    logger.info("🔄 Shutting down PAANY RAG Reverse Proxy...")
+    
+    # Stop health monitoring
+    health_monitor.stop_monitoring()
+    
+    # Close HTTP session
     global http_session
     if http_session and not http_session.closed:
         await http_session.close()
+    
     logger.info("🔄 Proxy server shutdown complete")
 
 # Main execution
@@ -329,6 +520,9 @@ if __name__ == "__main__":
     
     logger.info(f"🚀 Starting PAANY RAG Reverse Proxy on port {port}")
     logger.info(f"🎯 Target AWS instance: {AWS_LIGHTSAIL_URL}")
+    logger.info(f"🔄 Health monitoring: {'Enabled' if ENABLE_CONTINUOUS_HEALTH_CHECK else 'Disabled'}")
+    if ENABLE_CONTINUOUS_HEALTH_CHECK:
+        logger.info(f"⏱️  Health check interval: {HEALTH_CHECK_INTERVAL} seconds")
     
     uvicorn.run(
         "main:app",

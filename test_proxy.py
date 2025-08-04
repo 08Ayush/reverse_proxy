@@ -35,6 +35,28 @@ def test_proxy_health():
         print(f"❌ Proxy health test failed: {e}")
         return False
 
+def test_server_health():
+    """Test server health endpoint with continuous monitoring"""
+    print("\n💻 Testing server health (continuous monitoring)...")
+    try:
+        response = requests.get(f"{PROXY_URL}/server/health")
+        print(f"Status: {response.status_code}")
+        result = response.json()
+        print(f"Response: {json.dumps(result, indent=2)}")
+        
+        # Additional info about monitoring
+        if result.get('monitoring_enabled'):
+            print(f"✅ Continuous monitoring is active (every {result.get('monitoring_interval_seconds')}s)")
+            print(f"📊 System stats: CPU {result.get('system_stats', {}).get('cpu_usage_percent', 0)}%, Memory {result.get('system_stats', {}).get('memory_usage_percent', 0)}%")
+            print(f"⏱️  Uptime: {result.get('uptime_formatted', 'unknown')}")
+        else:
+            print("⚠️  Continuous monitoring is disabled")
+        
+        return response.status_code == 200
+    except Exception as e:
+        print(f"❌ Server health test failed: {e}")
+        return False
+
 def test_health():
     """Test basic health endpoint (forwards to AWS)"""
     print("\n🏥 Testing health endpoint (AWS forwarding)...")
@@ -140,6 +162,7 @@ def run_all_tests():
     tests = [
         ("Root Endpoint", test_root),
         ("Proxy Health", test_proxy_health),
+        ("Server Health (Monitoring)", test_server_health),
         ("Basic Health (AWS)", test_health),
         ("API Health (AWS)", test_api_health),
         ("Redis Status (AWS)", test_redis_status),
