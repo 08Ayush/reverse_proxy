@@ -310,8 +310,9 @@ async def process_document_and_answer(
         if status_code == 200:
             return QueryResponse(**response_data)
         else:
-            raise HTTPException(status_code=status_code, detail=response_data.get("error", "Request failed"))
-            
+            # NEW, MORE ROBUST CODE
+            detail = response_data.get("detail", response_data.get("error", "An unknown error occurred on the RAG server."))
+            raise HTTPException(status_code=status_code, detail=detail)
     except HTTPException:
         raise
     except Exception as e:
