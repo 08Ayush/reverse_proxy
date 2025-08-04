@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: paany-rag-proxy
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: AWS_LIGHTSAIL_URL
+        value: http://YOUR_AWS_IP:8000  # Replace with your AWS IP
+      - key: PROXY_TOKEN
+        value: 6e8b43cca9d29b261843a3b1c53382bdaa5b2c9e96db92da679278c6dc0042ca
+      - key: TIMEOUT_SECONDS
+        value: 120
